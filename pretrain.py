@@ -263,6 +263,69 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             return reduced_metrics
 
 
+def fast_evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataLoader, eval_metadata: PuzzleDatasetMetadata, rank: int, world_size: int, max_batches: int = 5):
+    """
+    Quick evaluation loop for logging metrics to WandB without saving full predictions.
+    - max_batches: number of batches to evaluate for fast feedback
+    """
+    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
+        set_ids = {k: idx for idx, k in enumerate(eval_metadata.sets)}
+
+        metric_keys = []
+        metric_values = None
+        metric_global_batch_size = [0 for _ in range(len(set_ids))]
+
+        carry = None
+        for batch_idx, (set_name, batch, global_batch_size) in enumerate(eval_loader):
+            if batch_idx >= max_batches:
+                break  # Only process a few batches for speed
+
+            # Move batch to GPU
+            batch = {k: v.cuda() for k, v in batch.items()}
+            carry = train_state.model.initial_carry(batch)  # type: ignore
+
+            # Forward pass (autoregressive)
+            while True:
+                carry, _, metrics, _, all_finish = train_state.model(
+                    carry=carry, batch=batch, return_keys=config.eval_save_outputs
+                )
+                if all_finish:
+                    break
+
+            # Aggregate metrics
+            set_id = set_ids[set_name]
+            if metric_values is None:
+                metric_keys = list(sorted(metrics.keys()))
+                metric_values = torch.zeros((len(set_ids), len(metric_keys)), dtype=torch.float32, device="cpu")
+
+            # Move metrics to CPU and sum
+            metric_values[set_id] += torch.tensor([metrics[k].item() for k in metric_keys], dtype=torch.float32)
+            metric_global_batch_size[set_id] += global_batch_size
+
+            del carry, batch, all_finish, metrics
+
+        # Reduce across GPUs
+        if world_size > 1:
+            dist.reduce(metric_values, dst=0)
+
+        if rank == 0 and metric_values is not None:
+            reduced_metrics = metric_values.numpy()
+            reduced_metrics = {
+                set_name: {
+                    metric_name: reduced_metrics[set_id, metric_id] / max(metric_global_batch_size[set_id], 1)
+                    for metric_id, metric_name in enumerate(metric_keys)
+                }
+                for set_id, set_name in enumerate(set_ids)
+            }
+
+            # Optionally log to WandB
+            import wandb
+            for set_name, metrics in reduced_metrics.items():
+                wandb.log({f"eval/{set_name}/{k}": v for k, v in metrics.items()})
+
+            return reduced_metrics
+
+
 def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataLoader, eval_metadata: PuzzleDatasetMetadata, rank: int, world_size: int):
     with torch.inference_mode():
         set_ids = {k: idx for idx, k in enumerate(eval_metadata.sets)}
@@ -437,7 +500,7 @@ def launch(hydra_config: DictConfig):
         train_state.model.eval()
         print("Starting evaluation...")
 
-        metrics = evaluate(config, train_state, eval_loader, eval_metadata, rank=RANK, world_size=WORLD_SIZE)
+        metrics = fast_evaluate(config, train_state, eval_loader, eval_metadata, rank=RANK, world_size=WORLD_SIZE)
         print("Evaluation done")
 
         if RANK == 0 and metrics is not None:
