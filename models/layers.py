@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 try:
     from flash_attn_interface import flash_attn_func  # type: ignore[import]
-except ImportError:
+except (ImportError, ModuleNotFoundError):
     print("FlashAttention not available — using standard attention")
     
     # simple stub replacement
