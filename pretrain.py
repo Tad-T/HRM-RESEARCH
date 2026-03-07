@@ -320,7 +320,7 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
             if rank == 0:
                 reduced_metrics = metric_values.cpu().numpy()
                 reduced_metrics = {set_name: {metric_name: reduced_metrics[set_id, metric_id] for metric_id, metric_name in enumerate(metric_keys)}
-                                   for set_id, set_name in enumerate(set_ids)}
+                for set_id, set_name in enumerate(set_ids)}
                 
                 # Postprocess
                 for set_name, metrics in reduced_metrics.items():
@@ -433,15 +433,23 @@ def launch(hydra_config: DictConfig):
                 progress_bar.update(train_state.step - progress_bar.n)  # type: ignore
 
         ############ Evaluation
+        print("=== TRAINING LOOP DONE ===")
         train_state.model.eval()
+        print("Starting evaluation...")
+
         metrics = evaluate(config, train_state, eval_loader, eval_metadata, rank=RANK, world_size=WORLD_SIZE)
+        print("Evaluation done")
 
         if RANK == 0 and metrics is not None:
             wandb.log(metrics, step=train_state.step)
-            
-        ############ Checkpointing
+            print("Logged evaluation metrics to WandB")
+
         if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
+            print("Saving checkpoint...")
             save_train_state(config, train_state)
+            print("Checkpoint saved")
+
+        print("=== TRAINING CELL COMPLETE ===")
 
     # finalize
     if dist.is_initialized():
