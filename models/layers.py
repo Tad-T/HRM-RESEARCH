@@ -4,23 +4,18 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-try:
-    from flash_attn_interface import flash_attn_func  # type: ignore[import]
-except (ImportError, ModuleNotFoundError):
-    print("FlashAttention not available — using standard attention")
-    
-    # simple stub replacement
-    def flash_attn_func(q, k, v, dropout_p=0.0, causal=False):
-        # standard scaled dot-product attention
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (q.size(-1) ** 0.5)
-        if causal:
-            # causal mask for autoregressive attention
-            mask = torch.triu(torch.ones(attn_scores.shape[-2:], device=attn_scores.device), diagonal=1)
-            attn_scores = attn_scores.masked_fill(mask.bool(), float("-inf"))
-        attn_probs = F.softmax(attn_scores, dim=-1)
-        if dropout_p > 0:
-            attn_probs = F.dropout(attn_probs, p=dropout_p)
-        return torch.matmul(attn_probs, v)
+# simple stub replacement
+def flash_attn_func(q, k, v, dropout_p=0.0, causal=False):
+    # standard scaled dot-product attention
+    attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (q.size(-1) ** 0.5)
+    if causal:
+        # causal mask for autoregressive attention
+        mask = torch.triu(torch.ones(attn_scores.shape[-2:], device=attn_scores.device), diagonal=1)
+        attn_scores = attn_scores.masked_fill(mask.bool(), float("-inf"))
+    attn_probs = F.softmax(attn_scores, dim=-1)
+    if dropout_p > 0:
+        attn_probs = F.dropout(attn_probs, p=dropout_p)
+    return torch.matmul(attn_probs, v)
 
 from models.common import trunc_normal_init_
 
