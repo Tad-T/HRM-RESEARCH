@@ -126,9 +126,11 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
         model: nn.Module = model_cls(model_cfg)
         model = loss_head_cls(model, **config.arch.loss.__pydantic_extra__)  # type: ignore
 
+        '''
         for name, param in model.named_parameters():
             if "A" not in name and "B" not in name:
                 param.requires_grad = False
+        '''
 
         if "DISABLE_COMPILE" not in os.environ:
             model = torch.compile(model, dynamic=False)  # type: ignore
