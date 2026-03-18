@@ -96,6 +96,9 @@ class CastedLinear(nn.Module):
             # Zero init bias
             self.bias = nn.Parameter(torch.zeros((out_features, )))
 
+        self.in_features = in_features
+        self.out_features = out_features
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, self.weight.to(input.dtype), bias=self.bias.to(input.dtype) if self.bias is not None else None)
 
