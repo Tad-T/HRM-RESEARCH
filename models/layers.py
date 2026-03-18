@@ -1,7 +1,7 @@
 from typing import Tuple
 
 import torch
-from torch import nn
+from torch import dtype, nn
 import torch.nn.functional as F
 
 try:
@@ -62,9 +62,11 @@ class LoRALinear(nn.Module):
         out_dim = base_layer.weight.shape[0]
 
         # LoRA factors
-        self.A = nn.Parameter(torch.randn(r, in_dim) * 0.01)   # (r, in)
-        self.B = nn.Parameter(torch.zeros(out_dim, r))         # (out, r)
+        dtype = base_layer.weight.dtype
+        device = base_layer.weight.device
 
+        self.A = nn.Parameter(torch.randn(in_dim, r, device=device, dtype=dtype) * 0.01)
+        self.B = nn.Parameter(torch.zeros(r, out_dim, device=device, dtype=dtype))
         self.scaling = alpha / r
 
     def forward(self, x):
