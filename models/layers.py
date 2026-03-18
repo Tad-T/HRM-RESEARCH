@@ -52,7 +52,7 @@ def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, si
     return q_embed.to(orig_dtype), k_embed.to(orig_dtype)
 
 class LoRALinear(nn.Module):
-    def __init__(self, base_layer, r=8, alpha=16):
+    def __init__(self, base_layer, hidden_size, r=8, alpha=16):
         super().__init__()
         self.base = base_layer
         self.r = r
@@ -67,8 +67,8 @@ class LoRALinear(nn.Module):
 
         # x: [batch, seq_len, hidden_size] e.g. [64, 82, 512]
         # r = LoRA rank
-        self.A = nn.Parameter(torch.randn(base_layer.hidden_size, r) * 0.01)  # [512, r]
-        self.B = nn.Parameter(torch.randn(r, base_layer.hidden_size) * 0.01)  # [r, 512]
+        self.A = nn.Parameter(torch.randn(hidden_size, r) * 0.01)  # [512, r]
+        self.B = nn.Parameter(torch.randn(r, hidden_size) * 0.01)  # [r, 512]
         self.scaling = alpha / r
 
     def forward(self, x):
@@ -149,12 +149,14 @@ class Attention(nn.Module):
         self.qkv_proj = LoRALinear(
             CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False),
             r=8,
-            alpha=16
+            alpha=16,
+            hidden_size=self.hidden_size
         )
         self.o_proj = LoRALinear(
             CastedLinear(self.output_size, self.hidden_size, bias=False),
             r=8,
-            alpha=16
+            alpha=16,
+            hidden_size=self.hidden_size
         )
 
     def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
