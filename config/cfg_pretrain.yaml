@@ -17,6 +17,7 @@ epochs: 100000
 eval_interval: 10000
 checkpoint_every_eval: True
 check_ckpt_path: False
+checkpoint_path: null
 
 lr: 1e-4
 lr_min_ratio: 1.0

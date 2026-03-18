@@ -202,6 +202,8 @@ def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetada
 
 
 def save_train_state(config: PretrainConfig, train_state: TrainState):
+    print(config.checkpoint_path)
+
     # FIXME: Only saved model.
     if config.checkpoint_path is None:
         return
