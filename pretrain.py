@@ -124,6 +124,11 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
     with torch.device("cuda"):
         model: nn.Module = model_cls(model_cfg)
         model = loss_head_cls(model, **config.arch.loss.__pydantic_extra__)  # type: ignore
+
+        for name, param in model.named_parameters():
+            if "A" not in name and "B" not in name:
+                param.requires_grad = False
+
         if "DISABLE_COMPILE" not in os.environ:
             model = torch.compile(model, dynamic=False)  # type: ignore
 
@@ -144,7 +149,8 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
             world_size=world_size
         ),
         AdamW(
-            model.parameters(),
+            #model.parameters(),
+            [p for p in model.parameters() if p.requires_grad],
 
             lr=0,  # Needs to be set by scheduler
             weight_decay=config.weight_decay,
@@ -175,6 +181,11 @@ def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetada
 
     # Model
     model, optimizers, optimizer_lrs = create_model(config, train_metadata, world_size=world_size)
+
+    if config.checkpoint_path is not None:
+        ckpt_path = os.path.join(config.checkpoint_path, f"step_2000")  # FIXME: Hardcoded checkpoint step
+        state_dict = torch.load(ckpt_path, map_location="cuda")
+        model.load_state_dict(state_dict, strict=False)
 
     return TrainState(
         step=0,

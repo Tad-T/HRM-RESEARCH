@@ -51,6 +51,31 @@ def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, si
 
     return q_embed.to(orig_dtype), k_embed.to(orig_dtype)
 
+class LoRALinear(nn.Module):
+    def __init__(self, base_layer, r=8, alpha=16):
+        super().__init__()
+        self.base = base_layer
+        self.r = r
+        self.alpha = alpha
+
+        in_dim = base_layer.weight.shape[1]
+        out_dim = base_layer.weight.shape[0]
+
+        # LoRA factors
+        self.A = nn.Parameter(torch.randn(r, in_dim) * 0.01)   # (r, in)
+        self.B = nn.Parameter(torch.zeros(out_dim, r))         # (out, r)
+
+        self.scaling = alpha / r
+
+    def forward(self, x):
+        # Base output
+        base_out = F.linear(x, self.base.weight, self.base.bias)
+
+        # LoRA update: x @ A^T @ B^T
+        lora_out = F.linear(x, self.A)          # (batch, *, r)
+        lora_out = F.linear(lora_out, self.B)   # (batch, *, out)
+
+        return base_out + self.scaling * lora_out
 
 class CastedLinear(nn.Module):
     def __init__(self,
@@ -118,8 +143,16 @@ class Attention(nn.Module):
         self.num_key_value_heads = num_key_value_heads
         self.causal = causal
 
-        self.qkv_proj = CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False)
-        self.o_proj = CastedLinear(self.output_size, self.hidden_size, bias=False)
+        self.qkv_proj = LoRALinear(
+            CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False),
+            r=8,
+            alpha=16
+        )
+        self.o_proj = LoRALinear(
+            CastedLinear(self.output_size, self.hidden_size, bias=False),
+            r=8,
+            alpha=16
+        )
 
     def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
