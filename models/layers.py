@@ -65,8 +65,10 @@ class LoRALinear(nn.Module):
         dtype = base_layer.weight.dtype
         device = base_layer.weight.device
 
-        self.A = nn.Parameter(torch.randn(in_dim, r, device=device, dtype=dtype) * 0.01)
-        self.B = nn.Parameter(torch.zeros(r, out_dim, device=device, dtype=dtype))
+        # x: [batch, seq_len, hidden_size] e.g. [64, 82, 512]
+        # r = LoRA rank
+        self.A = nn.Parameter(torch.randn(base_layer.hidden_size, r) * 0.01)  # [512, r]
+        self.B = nn.Parameter(torch.randn(r, base_layer.hidden_size) * 0.01)  # [r, 512]
         self.scaling = alpha / r
 
     def forward(self, x):
@@ -74,8 +76,7 @@ class LoRALinear(nn.Module):
         base_out = F.linear(x, self.base.weight, self.base.bias)
 
         # LoRA update: x @ A^T @ B^T
-        lora_out = F.linear(x, self.A)          # (batch, *, r)
-        lora_out = F.linear(lora_out, self.B)   # (batch, *, out)
+        lora_out = (x @ self.A) @ self.B;
 
         return base_out + self.scaling * lora_out
 
