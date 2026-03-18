@@ -388,8 +388,7 @@ def load_synced_config(hydra_config: DictConfig, rank: int, world_size: int) -> 
         if config.run_name is None:
             config.run_name = f"{config.arch.name.split('@')[-1]} {generate_slug(2)}"
         if config.checkpoint_path is None:
-            print("checkpoint_path is None")
-            config.checkpoint_path = os.path.join("checkpoints", config.project_name, config.run_name)
+            config.checkpoint_path = os.path.join("/kaggle/working/HRM-RESEARCH/checkpoints", config.project_name, config.run_name)
 
         objects = [config]
 
