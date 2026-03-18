@@ -62,6 +62,7 @@ class PretrainConfig(pydantic.BaseModel):
     project_name: Optional[str] = None
     run_name: Optional[str] = None
     checkpoint_path: Optional[str] = None
+    check_ckpt_path: bool = False
 
     # Extras
     seed: int = 0
@@ -182,8 +183,8 @@ def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetada
     # Model
     model, optimizers, optimizer_lrs = create_model(config, train_metadata, world_size=world_size)
 
-    if config.checkpoint_path is not None:
-        ckpt_path = os.path.join(config.checkpoint_path, f"step_2000")  # FIXME: Hardcoded checkpoint step
+    if config.check_ckpt_path and config.checkpoint_path is not None:
+        ckpt_path = os.path.join(config.checkpoint_path, f"step_200")  # FIXME: Hardcoded checkpoint step
         state_dict = torch.load(ckpt_path, map_location="cuda")
         model.load_state_dict(state_dict, strict=False)
 
