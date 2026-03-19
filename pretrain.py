@@ -202,14 +202,13 @@ def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetada
 
 
 def save_train_state(config: PretrainConfig, train_state: TrainState):
-    print(config.checkpoint_path)
-
     # FIXME: Only saved model.
     if config.checkpoint_path is None:
         return
 
     os.makedirs(config.checkpoint_path, exist_ok=True)
     torch.save(train_state.model.state_dict(), os.path.join(config.checkpoint_path, f"step_{train_state.step}"))
+    print('Saved model checkpoint')
 
 
 def compute_lr(base_lr: float, config: PretrainConfig, train_state: TrainState):
