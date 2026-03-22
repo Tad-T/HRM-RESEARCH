@@ -253,12 +253,13 @@ def save_train_state(config: PretrainConfig, train_state: TrainState):
 
     # ONLY Rank 0 saves
     if dist.get_rank() == 0:
+        print("RANK 0: Saving checkpoint...")
         os.makedirs(config.checkpoint_path, exist_ok=True)
         save_path = os.path.join(config.checkpoint_path, f"step_{train_state.step}.pt")
         
         # Save a temporary file then move it to ensure atomicity
         torch.save(train_state.model.state_dict(), save_path)
-        print(f'Successfully saved checkpoint to {save_path}')
+        print(f'Rank 0: Successfully saved checkpoint to {save_path}')
 
     if dist.is_initialized():
         dist.barrier()
@@ -553,10 +554,8 @@ def launch(hydra_config: DictConfig):
             wandb.log(metrics, step=train_state.step)
             print("Logged evaluation metrics to WandB")
 
-        if RANK == 0 and (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
-            print("Saving checkpoint...")
+        if (config.checkpoint_every_eval or (_iter_id == total_iters - 1)):
             save_train_state(config, train_state)
-            print("Checkpoint saved")
 
         print("=== TRAINING CELL COMPLETE ===")
 
