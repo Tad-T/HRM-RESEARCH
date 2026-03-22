@@ -231,11 +231,6 @@ def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetada
     # Model
     model, optimizers, optimizer_lrs = create_model(config, train_metadata, world_size=world_size)
 
-    if config.checkpoint_path is not None:
-        ckpt_path = os.path.join(config.checkpoint_path, f"step_200")  # FIXME: Hardcoded checkpoint step
-        state_dict = torch.load(ckpt_path, map_location="cuda")
-        model.load_state_dict(state_dict, strict=False)
-
     return TrainState(
         step=0,
         total_steps=total_steps,
