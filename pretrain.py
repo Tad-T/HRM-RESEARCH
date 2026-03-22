@@ -70,6 +70,7 @@ class PretrainConfig(pydantic.BaseModel):
     checkpoint_every_eval: bool = False
     eval_interval: Optional[int] = None
     eval_save_outputs: List[str] = []
+    limit_eval_batches: int = -1  # For quick eval runs, set a positive number to limit eval batches
 
 
 @dataclass
@@ -340,7 +341,10 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
         metric_keys = []
         metric_values = None
 
-        for set_name, batch, global_batch_size in eval_loader:
+        for batch_i, (set_name, batch, global_batch_size) in enumerate(eval_loader):
+
+            if config.limit_eval_batches > 0 and batch_i >= config.limit_eval_batches:
+                break
             # Prepare Batch
             batch = {k: v.cuda() for k, v in batch.items()}
             
