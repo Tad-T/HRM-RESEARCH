@@ -142,7 +142,7 @@ class RotaryEmbedding(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, lora_r=8, causal=False):
+    def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, causal=False):
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -152,17 +152,8 @@ class Attention(nn.Module):
         self.num_key_value_heads = num_key_value_heads
         self.causal = causal
 
-        # Wrap the CastedLinear with LoRA
-        self.qkv_proj = LoRALinear(
-            CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False),
-            r=lora_r,
-            alpha=lora_r * 2
-        )
-        self.o_proj = LoRALinear(
-            CastedLinear(self.output_size, self.hidden_size, bias=False),
-            r=lora_r,
-            alpha=lora_r * 2
-        )
+        self.qkv_proj = CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False)
+        self.o_proj = CastedLinear(self.output_size, self.hidden_size, bias=False)
 
     def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
