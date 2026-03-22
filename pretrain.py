@@ -342,7 +342,6 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
         metric_values = None
 
         for batch_i, (set_name, batch, global_batch_size) in enumerate(eval_loader):
-
             if config.limit_eval_batches > 0 and batch_i >= config.limit_eval_batches:
                 break
             # Prepare Batch
@@ -402,23 +401,33 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
 
             del initial_carry, current_carry, preds, batch
 
-        # Reduction and Reporting
+        # --- MANDATORY DISTRIBUTED SYNC ---
         if world_size > 1:
-            if metric_values is not None:
-                dist.reduce(metric_values, dst=0)
-            else:
-                # If a rank has no data, it MUST still participate in the reduce with zeros
-                dummy_values = torch.zeros((len(set_ids), len(metric_keys)), device="cuda")
-                dist.reduce(dummy_values, dst=0)
+            # 1. Barrier ensures everyone has exited the loop
+            dist.barrier()
+            
+            # 2. Safety: Sync the number of metrics so "empty" ranks can participate
+            num_metrics = torch.tensor(len(metric_keys) if metric_keys else 0, device="cuda")
+            dist.all_reduce(num_metrics, op=dist.ReduceOp.MAX)
+            
+            # 3. Create zero-filled tensor for ranks that didn't process data
+            if metric_values is None:
+                metric_values = torch.zeros((len(set_ids), (int)(num_metrics.item())), device="cuda")
+            
+            # 4. Global reduction to Rank 0
+            dist.reduce(metric_values, dst=0)
 
+        # --- RANK 0 REPORTING ---
         if rank == 0 and metric_values is not None:
             reduced_data = metric_values.cpu().numpy()
             final_report = {}
             
             for set_id, set_name in enumerate(set_ids):
-                # Map keys to the reduced values
+                if not metric_keys: break
+                
                 res = {metric_keys[i]: reduced_data[set_id, i] for i in range(len(metric_keys))}
                 
+                # Check for "count" to perform averaging
                 if "count" in res and res["count"] > 0:
                     count = res.pop("count")
                     final_report[set_name] = {k: v / count for k, v in res.items()}
@@ -426,6 +435,8 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
                     final_report[set_name] = {k: v for k, v in res.items()}
             
             return final_report
+            
+    return None
 
 
 def save_code_and_config(config: PretrainConfig):
