@@ -18,6 +18,7 @@ import pydantic
 from omegaconf import DictConfig
 from torch.optim import AdamW
 
+from models.layers import LoRALinear, CastedLinear
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils.functions import load_model_class, get_model_source_path
 from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
@@ -62,7 +63,7 @@ class PretrainConfig(pydantic.BaseModel):
     project_name: Optional[str] = None
     run_name: Optional[str] = None
     checkpoint_path: Optional[str] = None
-    check_ckpt_path: bool = False
+    pretrained_weight_path: Optional[str] = None
 
     # Extras
     seed: int = 0
@@ -105,6 +106,22 @@ def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size:
     )
     return dataloader, dataset.metadata
 
+def apply_lora_to_reasoning(module: nn.Module, r: int = 8, alpha: int = 16):
+    """
+    Recursively finds all CastedLinear layers and wraps them in LoRA.
+    """
+    for name, child in module.named_children():
+        if isinstance(child, CastedLinear):
+            # 1. Create the LoRA wrapper around the existing CastedLinear
+            # We use alpha=r*2 as a common heuristic for stability
+            lora_layer = LoRALinear(child, r=r, alpha=alpha)
+            
+            # 2. Replace the original attribute with the LoRA version
+            setattr(module, name, lora_layer)
+            
+        else:
+            # 3. If it's not a linear layer, dive deeper (into Blocks, etc.)
+            apply_lora_to_reasoning(child, r, alpha)
 
 def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, world_size: int):
     model_cfg = dict(
@@ -123,14 +140,43 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
     loss_head_cls = load_model_class(config.arch.loss.name)
 
     with torch.device("cuda"):
-        model: nn.Module = model_cls(model_cfg)
-        model = loss_head_cls(model, **config.arch.loss.__pydantic_extra__)  # type: ignore
+        # Always start with the raw architecture
+        base_model: nn.Module = model_cls(model_cfg)
 
-        '''
-        for name, param in model.named_parameters():
-            if "A" not in name and "B" not in name:
+        # CASE A: FINETUNING (Load weights + Inject LoRA)
+        if config.pretrained_weight_path and os.path.exists(config.pretrained_weight_path):
+            print(f">>> LORA MODE: Loading weights from {config.pretrained_weight_path}")
+            
+            # 1. Load the frozen knowledge
+            sd = torch.load(config.pretrained_weight_path, map_location="cuda")
+            base_model.load_state_dict(sd, strict=False)
+            
+            # 2. Add the trainable "side-cars"
+            apply_lora_to_reasoning(base_model.inner, r=8)
+            loss_extra = config.arch.loss.model_dump(exclude={'name'})
+            model: nn.Module = loss_head_cls(base_model, **loss_extra)
+
+            # 3. Lock the base, unlock the adapters
+            for param in model.parameters():
                 param.requires_grad = False
-        '''
+            for name, param in model.named_parameters():
+                if "lora_" in name or "q_head" in name:
+                    param.requires_grad = True
+
+        # CASE B: PRETRAINING (From Scratch)
+        else:
+            print(">>> PRETRAIN MODE: Fresh weights, full gradients.")
+            loss_extra = config.arch.loss.model_dump(exclude={'name'})
+            model = loss_head_cls(base_model, **loss_extra)
+            # All params stay requires_grad = True (default)
+            
+            # Ensure everything is trainable
+            for param in model.parameters():
+                param.requires_grad = True
+
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f">>> [Model Setup] Trainable: {trainable_params:,} | Total: {total_params:,} ({100 * trainable_params/total_params:.2f}%)")
 
         if "DISABLE_COMPILE" not in os.environ:
             model = torch.compile(model, dynamic=False)  # type: ignore
@@ -185,7 +231,7 @@ def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetada
     # Model
     model, optimizers, optimizer_lrs = create_model(config, train_metadata, world_size=world_size)
 
-    if config.check_ckpt_path and config.checkpoint_path is not None:
+    if config.checkpoint_path is not None:
         ckpt_path = os.path.join(config.checkpoint_path, f"step_200")  # FIXME: Hardcoded checkpoint step
         state_dict = torch.load(ckpt_path, map_location="cuda")
         model.load_state_dict(state_dict, strict=False)
@@ -202,13 +248,24 @@ def init_train_state(config: PretrainConfig, train_metadata: PuzzleDatasetMetada
 
 
 def save_train_state(config: PretrainConfig, train_state: TrainState):
-    # FIXME: Only saved model.
     if config.checkpoint_path is None:
         return
 
-    os.makedirs(config.checkpoint_path, exist_ok=True)
-    torch.save(train_state.model.state_dict(), os.path.join(config.checkpoint_path, f"step_{train_state.step}"))
-    print('Saved model checkpoint')
+    # Ensure all processes reach this point
+    if dist.is_initialized():
+        dist.barrier()
+
+    # ONLY Rank 0 saves
+    if dist.get_rank() == 0:
+        os.makedirs(config.checkpoint_path, exist_ok=True)
+        save_path = os.path.join(config.checkpoint_path, f"step_{train_state.step}.pt")
+        
+        # Save a temporary file then move it to ensure atomicity
+        torch.save(train_state.model.state_dict(), save_path)
+        print(f'Successfully saved checkpoint to {save_path}')
+
+    if dist.is_initialized():
+        dist.barrier()
 
 
 def compute_lr(base_lr: float, config: PretrainConfig, train_state: TrainState):

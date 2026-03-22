@@ -1,6 +1,7 @@
 from typing import Tuple
 
 import torch
+import math
 from torch import dtype, nn
 import torch.nn.functional as F
 
@@ -52,34 +53,35 @@ def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, si
     return q_embed.to(orig_dtype), k_embed.to(orig_dtype)
 
 class LoRALinear(nn.Module):
-    def __init__(self, base_layer, r=8, alpha=16):
+    def __init__(self, base_layer: nn.Module, r: int = 8, alpha: int = 16):
         super().__init__()
-        self.base = base_layer
+        self.base = base_layer  # This is your frozen CastedLinear
         self.r = r
         self.alpha = alpha
-
-        in_dim = base_layer.weight.shape[1]
-        out_dim = base_layer.weight.shape[0]
-
-        # LoRA factors
-        dtype = base_layer.weight.dtype
-        device = base_layer.weight.device
-
-        # x: [batch, seq_len, hidden_size] e.g. [64, 82, 512]
-        # r = LoRA rank
-        # LoRA B: r × output_dim
-        self.A = nn.Parameter(torch.zeros(base_layer.in_features, r))
-        self.B = nn.Parameter(torch.zeros(r, base_layer.out_features))
         self.scaling = alpha / r
 
-    def forward(self, x):
-        # Base output
-        base_out = F.linear(x, self.base.weight, self.base.bias)
+        # Define A and B parameters
+        # A is initialized with noise, B is initialized with zeros
+        # so that the initial impact of LoRA is 0
+        in_features = base_layer.weight.shape[1]
+        out_features = base_layer.weight.shape[0]
+        
+        self.lora_A = nn.Parameter(torch.empty((in_features, r)))
+        self.lora_B = nn.Parameter(torch.zeros((r, out_features)))
+        
+        # Initialize A
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
 
-        # LoRA update: x @ A^T @ B^T
-        lora_out = (x @ self.A) @ self.B;
-
-        return base_out + self.scaling * lora_out
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 1. Path of the frozen original weights
+        base_out = self.base(x)
+        
+        # 2. Path of the trainable adapters (A -> B)
+        # We ensure the dtype matches the input (usually bfloat16)
+        lora_out = (x.to(self.lora_A.dtype) @ self.lora_A) @ self.lora_B
+        
+        # 3. Combine
+        return base_out + (lora_out * self.scaling)
 
 class CastedLinear(nn.Module):
     def __init__(self,
@@ -140,7 +142,7 @@ class RotaryEmbedding(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, causal=False):
+    def __init__(self, hidden_size, head_dim, num_heads, num_key_value_heads, lora_r=8, causal=False):
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -150,21 +152,17 @@ class Attention(nn.Module):
         self.num_key_value_heads = num_key_value_heads
         self.causal = causal
 
-        '''
+        # Wrap the CastedLinear with LoRA
         self.qkv_proj = LoRALinear(
             CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False),
-            r=8,
-            alpha=16
+            r=lora_r,
+            alpha=lora_r * 2
         )
         self.o_proj = LoRALinear(
             CastedLinear(self.output_size, self.hidden_size, bias=False),
-            r=8,
-            alpha=16
+            r=lora_r,
+            alpha=lora_r * 2
         )
-        '''
-
-        self.qkv_proj = CastedLinear(self.hidden_size, (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim, bias=False)
-        self.o_proj = CastedLinear(self.output_size, self.hidden_size, bias=False)
 
     def forward(self, cos_sin: CosSin, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, _ = hidden_states.shape
