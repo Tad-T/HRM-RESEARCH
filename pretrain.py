@@ -339,11 +339,8 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
         all_preds = {} # For eval_save_outputs
         metric_keys = []
         metric_values = None
-        
-        for batch_i, (set_name, batch, global_batch_size) in enumerate(eval_loader):
-            if batch_i >= 5:
-                break
 
+        for set_name, batch, global_batch_size in eval_loader:
             # Prepare Batch
             batch = {k: v.cuda() for k, v in batch.items()}
             
@@ -384,14 +381,14 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
             metrics["steps_to_halt"] = torch.tensor(float(steps_taken), device="cuda").detach()
             metrics["reasoning_gain"] = (step1_loss - final_loss).detach()
 
-            # 4. Handle eval_save_outputs (Your original logic)
+            # Handle eval_save_outputs
             for collection in (batch, preds):
                 for k, v in collection.items():
                     if k in config.eval_save_outputs:
                         all_preds.setdefault(k, [])
                         all_preds[k].append(v.cpu())
 
-            # 5. Aggregate Results
+            # Aggregate Results
             set_id = set_ids[set_name]
             if metric_values is None:
                 metric_keys = list(sorted(metrics.keys()))
@@ -399,26 +396,32 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
                 
             metric_values[set_id] += torch.stack([metrics[k].detach() for k in metric_keys])
 
-            # Cleanup: Make sure these match your loop variables!
-            # We use 'initial_carry' and 'current_carry' now
             del initial_carry, current_carry, preds, batch
 
-        # 6. Reduction and Reporting
-        if metric_values is not None:
-            if world_size > 1:
+        # Reduction and Reporting
+        if world_size > 1:
+            if metric_values is not None:
                 dist.reduce(metric_values, dst=0)
+            else:
+                # If a rank has no data, it MUST still participate in the reduce with zeros
+                dummy_values = torch.zeros((len(set_ids), len(metric_keys)), device="cuda")
+                dist.reduce(dummy_values, dst=0)
+
+        if rank == 0 and metric_values is not None:
+            reduced_data = metric_values.cpu().numpy()
+            final_report = {}
             
-            if rank == 0:
-                reduced_data = metric_values.cpu().numpy()
-                final_report = {}
+            for set_id, set_name in enumerate(set_ids):
+                # Map keys to the reduced values
+                res = {metric_keys[i]: reduced_data[set_id, i] for i in range(len(metric_keys))}
                 
-                for set_id, set_name in enumerate(set_ids):
-                    raw_vals = {metric_keys[i]: reduced_data[set_id, i] for i in range(len(metric_keys))}
-                    count = raw_vals.pop("count")
-                    # Average the sums
-                    final_report[set_name] = {k: v / count for k, v in raw_vals.items()}
-                
-                return final_report
+                if "count" in res and res["count"] > 0:
+                    count = res.pop("count")
+                    final_report[set_name] = {k: v / count for k, v in res.items()}
+                else:
+                    final_report[set_name] = {k: v for k, v in res.items()}
+            
+            return final_report
 
 
 def save_code_and_config(config: PretrainConfig):
