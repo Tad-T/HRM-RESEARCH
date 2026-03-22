@@ -344,7 +344,7 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
             if batch_i >= 5:
                 break
 
-            # 1. Prepare Batch
+            # Prepare Batch
             batch = {k: v.cuda() for k, v in batch.items()}
             
             with torch.device("cuda"):
@@ -358,34 +358,30 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
             )
             step1_loss = step1_loss.detach() # DETACH HERE to save VRAM
 
-            # 2. Reasoning Loop (Think until Halt)
             steps_taken = 0
-            # Use the initial_carry again so the loop starts from the VERY beginning
             current_carry = initial_carry 
-            
             while True:
+                # Force logits to exist
+                keys = list(set(config.eval_save_outputs) | {"logits"})
                 current_carry, final_loss, metrics, preds, all_finish = train_state.model(
-                    carry=current_carry, batch=batch, return_keys=config.eval_save_outputs
+                    carry=current_carry, batch=batch, return_keys=keys
                 )
                 steps_taken += 1
                 if all_finish or steps_taken >= 15:
                     break
 
-            # 3. Calculate Performance Metrics
+            # Scoped and Detached Metrics
             final_logits = preds['logits']
             targets = batch['targets']
             
-            # Solve Rate: Exact match across the whole sequence
-            is_correct = (final_logits.argmax(-1) == targets).all(dim=-1).float()
-            
-            # Confidence: Entropy (Lower is better)
+            # Use .detach() on everything going into the metrics dict
+            is_correct = (final_logits.argmax(-1) == targets).all(dim=-1).float().detach()
             probs = torch.softmax(final_logits, dim=-1)
-            entropy = -torch.sum(probs * torch.log(probs + 1e-9), dim=-1).mean()
+            entropy = -torch.sum(probs * torch.log(probs + 1e-9), dim=-1).mean().detach()
 
-            # Inject custom metrics into the dictionary for aggregation
             metrics["solve_rate"] = is_correct.mean()
             metrics["final_entropy"] = entropy
-            metrics["steps_to_halt"] = torch.tensor(float(steps_taken), device="cuda")
+            metrics["steps_to_halt"] = torch.tensor(float(steps_taken), device="cuda").detach()
             metrics["reasoning_gain"] = (step1_loss - final_loss).detach()
 
             # 4. Handle eval_save_outputs (Your original logic)
