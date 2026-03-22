@@ -287,7 +287,7 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
 
     # Forward
-    train_state.carry, loss, metrics, _, _ = train_state.model(carry=train_state.carry, batch=batch, return_keys=[])
+    current_carry, loss, metrics, preds, _ = train_state.model(carry=train_state.carry, batch=batch, return_keys=[])
 
     ((1 / global_batch_size) * loss).backward()
 
@@ -329,7 +329,7 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             reduced_metrics["train/lr"] = lr_this_step
             # Inside train_batch, after the forward pass:
             # 'metrics' usually comes from your model's internal return
-            reduced_metrics["train/avg_steps"] = train_state.carry.halt_step.float().mean()
+            reduced_metrics["train/avg_steps"] = current_carry.steps.float().mean()
             return reduced_metrics
 
 
@@ -351,10 +351,10 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
                 # Create the starting state
                 initial_carry = train_state.model.initial_carry(batch)
 
-            # --- Reasoning Gain Tracking ---
-            # We use a 'disposable' carry here so we don't ruin the starting state for the loop
+            # Baseline check on a "dummy" copy
+            import copy
             _, step1_loss, _, _, _ = train_state.model(
-                carry=initial_carry, batch=batch, return_keys=[]
+                carry=copy.copy(initial_carry), batch=batch, return_keys=[]
             )
             step1_loss = step1_loss.detach() # DETACH HERE to save VRAM
 
