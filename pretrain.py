@@ -329,7 +329,7 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             reduced_metrics["train/lr"] = lr_this_step
             # Inside train_batch, after the forward pass:
             # 'metrics' usually comes from your model's internal return
-            reduced_metrics["train/avg_steps"] = train_state.carry['halt_step'].float().mean()
+            reduced_metrics["train/avg_steps"] = train_state.carry.halt_step.float().mean()
             return reduced_metrics
 
 
@@ -348,20 +348,22 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
             batch = {k: v.cuda() for k, v in batch.items()}
             
             with torch.device("cuda"):
-                carry = train_state.model.initial_carry(batch)
+                # Create the starting state
+                initial_carry = train_state.model.initial_carry(batch)
 
             # --- Reasoning Gain Tracking ---
-            # Get the baseline from the very first thought
+            # We use a 'disposable' carry here so we don't ruin the starting state for the loop
             _, step1_loss, _, _, _ = train_state.model(
-                carry=carry, batch=batch, return_keys=[]
+                carry=initial_carry, batch=batch, return_keys=[]
             )
+            step1_loss = step1_loss.detach() # DETACH HERE to save VRAM
 
             # 2. Reasoning Loop (Think until Halt)
             steps_taken = 0
-            current_carry = carry
+            # Use the initial_carry again so the loop starts from the VERY beginning
+            current_carry = initial_carry 
+            
             while True:
-                # We overwrite these variables each step, but 'preds' and 'batch' 
-                # from the FINAL step are what we use for metrics below.
                 current_carry, final_loss, metrics, preds, all_finish = train_state.model(
                     carry=current_carry, batch=batch, return_keys=config.eval_save_outputs
                 )
@@ -399,10 +401,11 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
                 metric_keys = list(sorted(metrics.keys()))
                 metric_values = torch.zeros((len(set_ids), len(metric_keys)), dtype=torch.float32, device="cuda")
                 
-            metric_values[set_id] += torch.stack([metrics[k] for k in metric_keys])
+            metric_values[set_id] += torch.stack([metrics[k].detach() for k in metric_keys])
 
-            # Cleanup this batch
-            del current_carry, carry, preds, batch
+            # Cleanup: Make sure these match your loop variables!
+            # We use 'initial_carry' and 'current_carry' now
+            del initial_carry, current_carry, preds, batch
 
         # 6. Reduction and Reporting
         if metric_values is not None:
