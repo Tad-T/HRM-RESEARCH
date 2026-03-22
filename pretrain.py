@@ -327,79 +327,99 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
 
             reduced_metrics["train/lr"] = lr_this_step
+            # Inside train_batch, after the forward pass:
+            # 'metrics' usually comes from your model's internal return
+            reduced_metrics["train/avg_steps"] = train_state.carry['halt_step'].float().mean()
             return reduced_metrics
 
 
 def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataLoader, eval_metadata: PuzzleDatasetMetadata, rank: int, world_size: int):
     with torch.inference_mode():
         set_ids = {k: idx for idx, k in enumerate(eval_metadata.sets)}
-        
-        all_preds = {}
-
+        all_preds = {} # For eval_save_outputs
         metric_keys = []
         metric_values = None
-        metric_global_batch_size = [0 for _ in range(len(set_ids))]
         
-        carry = None
         for batch_i, (set_name, batch, global_batch_size) in enumerate(eval_loader):
             if batch_i >= 5:
                 break
 
-            # To device
+            # 1. Prepare Batch
             batch = {k: v.cuda() for k, v in batch.items()}
             
             with torch.device("cuda"):
-                carry = train_state.model.initial_carry(batch)  # type: ignore
+                carry = train_state.model.initial_carry(batch)
 
-            # Forward
+            # --- Reasoning Gain Tracking ---
+            # Get the baseline from the very first thought
+            _, step1_loss, _, _, _ = train_state.model(
+                carry=carry, batch=batch, return_keys=[]
+            )
+
+            # 2. Reasoning Loop (Think until Halt)
+            steps_taken = 0
+            current_carry = carry
             while True:
-                carry, _, metrics, preds, all_finish = train_state.model(carry=carry, batch=batch, return_keys=config.eval_save_outputs)
-                
-                if all_finish:
+                # We overwrite these variables each step, but 'preds' and 'batch' 
+                # from the FINAL step are what we use for metrics below.
+                current_carry, final_loss, metrics, preds, all_finish = train_state.model(
+                    carry=current_carry, batch=batch, return_keys=config.eval_save_outputs
+                )
+                steps_taken += 1
+                if all_finish or steps_taken >= 15:
                     break
 
+            # 3. Calculate Performance Metrics
+            final_logits = preds['logits']
+            targets = batch['targets']
+            
+            # Solve Rate: Exact match across the whole sequence
+            is_correct = (final_logits.argmax(-1) == targets).all(dim=-1).float()
+            
+            # Confidence: Entropy (Lower is better)
+            probs = torch.softmax(final_logits, dim=-1)
+            entropy = -torch.sum(probs * torch.log(probs + 1e-9), dim=-1).mean()
+
+            # Inject custom metrics into the dictionary for aggregation
+            metrics["solve_rate"] = is_correct.mean()
+            metrics["final_entropy"] = entropy
+            metrics["steps_to_halt"] = torch.tensor(float(steps_taken), device="cuda")
+            metrics["reasoning_gain"] = (step1_loss - final_loss).detach()
+
+            # 4. Handle eval_save_outputs (Your original logic)
             for collection in (batch, preds):
                 for k, v in collection.items():
                     if k in config.eval_save_outputs:
                         all_preds.setdefault(k, [])
-                        all_preds[k].append(v.cpu())  # Move to CPU for saving GPU memory
-                        
-            del carry, preds, batch, all_finish
+                        all_preds[k].append(v.cpu())
 
-            # Aggregate
+            # 5. Aggregate Results
             set_id = set_ids[set_name]
-            
             if metric_values is None:
-                metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
-                metric_values = torch.zeros((len(set_ids), len(metrics.values())), dtype=torch.float32, device="cuda")
+                metric_keys = list(sorted(metrics.keys()))
+                metric_values = torch.zeros((len(set_ids), len(metric_keys)), dtype=torch.float32, device="cuda")
                 
             metric_values[set_id] += torch.stack([metrics[k] for k in metric_keys])
-            metric_global_batch_size[set_id] += global_batch_size
 
-        #if len(all_preds) and config.checkpoint_path is not None:
-        if False:
-            all_preds = {k: torch.cat(v, dim=0) for k, v in all_preds.items()}
+            # Cleanup this batch
+            del current_carry, carry, preds, batch
 
-            os.makedirs(config.checkpoint_path, exist_ok=True)
-            torch.save(all_preds, os.path.join(config.checkpoint_path, f"step_{train_state.step}_all_preds.{rank}"))
-
-        # Logging
-        # Reduce to rank 0
+        # 6. Reduction and Reporting
         if metric_values is not None:
             if world_size > 1:
                 dist.reduce(metric_values, dst=0)
             
             if rank == 0:
-                reduced_metrics = metric_values.cpu().numpy()
-                reduced_metrics = {set_name: {metric_name: reduced_metrics[set_id, metric_id] for metric_id, metric_name in enumerate(metric_keys)}
-                for set_id, set_name in enumerate(set_ids)}
+                reduced_data = metric_values.cpu().numpy()
+                final_report = {}
                 
-                # Postprocess
-                for set_name, metrics in reduced_metrics.items():
-                    count = metrics.pop("count")
-                    reduced_metrics[set_name] = {k: v / count for k, v in metrics.items()}
-
-                return reduced_metrics
+                for set_id, set_name in enumerate(set_ids):
+                    raw_vals = {metric_keys[i]: reduced_data[set_id, i] for i in range(len(metric_keys))}
+                    count = raw_vals.pop("count")
+                    # Average the sums
+                    final_report[set_name] = {k: v / count for k, v in raw_vals.items()}
+                
+                return final_report
 
 
 def save_code_and_config(config: PretrainConfig):
