@@ -372,7 +372,7 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
 
             # Scoped and Detached Metrics
             final_logits = preds['logits']
-            targets = batch['targets']
+            targets = batch['labels']
             
             # Use .detach() on everything going into the metrics dict
             is_correct = (final_logits.argmax(-1) == targets).all(dim=-1).float().detach()
