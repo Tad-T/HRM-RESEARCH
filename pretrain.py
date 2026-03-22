@@ -290,6 +290,7 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
 
     # Forward
     current_carry, loss, metrics, preds, _ = train_state.model(carry=train_state.carry, batch=batch, return_keys=[])
+    train_state.carry = current_carry
 
     ((1 / global_batch_size) * loss).backward()
 
@@ -384,6 +385,7 @@ def evaluate(config: PretrainConfig, train_state: TrainState, eval_loader: DataL
             metrics["final_entropy"] = entropy
             metrics["steps_to_halt"] = torch.tensor(float(steps_taken), device="cuda").detach()
             metrics["reasoning_gain"] = (step1_loss - final_loss).detach()
+            metrics["count"] = torch.tensor(float(batch['labels'].size(0)), device="cuda").detach()
 
             # Handle eval_save_outputs
             for collection in (batch, preds):
