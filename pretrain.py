@@ -50,6 +50,7 @@ class PretrainConfig(pydantic.BaseModel):
     lr: float
     lr_min_ratio: float
     lr_warmup_steps: int
+    halt_max_steps: int
 
     weight_decay: float
     beta1: float
@@ -283,16 +284,30 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
     # To device
     batch = {k: v.cuda() for k, v in batch.items()}
 
-    # Init carry if it is None
-    if train_state.carry is None:
-        with torch.device("cuda"):
-            train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
+    with torch.device("cuda"):
+            current_carry = train_state.model.initial_carry(batch)  # type: ignore
 
-    # Forward
-    current_carry, loss, metrics, preds, _ = train_state.model(carry=train_state.carry, batch=batch, return_keys=[])
-    train_state.carry = current_carry
+    total_loss = 0
+    final_metrics = {}
 
-    ((1 / global_batch_size) * loss).backward()
+    while True:
+        # The model internally handles the 1-step grad and detaches the next carry
+        current_carry, loss, metrics, preds, halted_all = train_state.model(
+            carry=current_carry, 
+            batch=batch, 
+            return_keys=[]
+        )
+
+        # Backpropagate every step (Deep Supervision) 
+        # but the carry is detached, so memory stays low
+        ((1 / global_batch_size) * loss).backward()
+        
+        total_loss += loss.detach()
+        final_metrics = metrics # Keep the latest metrics (most accurate)
+
+        # Exit if all puzzles are solved or we hit the ceiling
+        if halted_all or current_carry.steps.max() >= config.halt_max_steps:
+            break
 
     # Allreduce
     if world_size > 1:
