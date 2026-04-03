@@ -291,8 +291,10 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
     final_metrics = {}
 
     print("DEBUG: Entering Loop")
+    local_idx = 0
     while True:
         print(f"DEBUG: Step {train_state.step}")
+        local_idx += 1
         current_carry, loss, metrics, preds, halted_all = train_state.model(
             carry=current_carry,
             batch=batch,
@@ -301,7 +303,7 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
         ((1 / global_batch_size) * loss).backward()
 
         # 1. Local Exit: Logic OR Max Steps
-        stop_now = halted_all or (current_carry.steps.max() >= config.halt_max_steps)
+        stop_now = halted_all or (current_carry.steps.max() >= config.halt_max_steps) or (local_idx >= config.halt_max_steps)
 
         # 2. Global Exit: Synchronize Rank 0 and Rank 1
         if world_size > 1:
