@@ -16,7 +16,7 @@ from coolname.impl import generate_slug
 import hydra
 import pydantic
 from omegaconf import DictConfig
-from torch.optim import AdamW
+from adam_atan2 import AdamATan2
 
 from models.layers import LoRALinear, CastedLinear
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
@@ -199,7 +199,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
 
             world_size=world_size
         ),
-        AdamW(
+        AdamATan2(
             #model.parameters(),
             [p for p in model.parameters() if p.requires_grad],
 
