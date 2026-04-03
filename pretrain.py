@@ -280,17 +280,6 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
     train_state.step += 1
     if train_state.step > train_state.total_steps:  # At most train_total_steps
         return
-    
-    # Add this to your train_batch
-    import random
-
-    # Paper logic: 10% of the time, force the model to 'explore' deeper reasoning
-    if random.random() < 0.1: 
-        # Force it to think for anywhere between 2 and 16 steps
-        forced_min_steps = random.randint(2, config.halt_max_steps)
-    else:
-        # 90% of the time, let it try to be efficient
-        forced_min_steps = 1
 
     # To device
     batch = {k: v.cuda() for k, v in batch.items()}
@@ -303,7 +292,7 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
 
     while True:
         # The model internally handles the 1-step grad and detaches the next carry
-        current_carry, loss, metrics, preds, halted_all = train_state.model(
+        current_carry, loss, metrics, _, halted_all = train_state.model(
             carry=current_carry, 
             batch=batch, 
             return_keys=[]
@@ -316,8 +305,8 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
         total_loss += loss.detach()
         final_metrics = metrics # Keep the latest metrics (most accurate)
 
-        # Exit if all puzzles are solved or we hit the ceiling
-        if (halted_all and train_state.step >= forced_min_steps) or current_carry.steps.max() >= config.halt_max_steps:
+        # Exit if each process is halted
+        if halted_all:
             break
 
     # Allreduce
