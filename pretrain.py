@@ -291,24 +291,28 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
     final_metrics = {}
 
     while True:
-        # The model internally handles the 1-step grad and detaches the next carry
-        current_carry, loss, metrics, _, halted_all = train_state.model(
-            carry=current_carry, 
-            batch=batch, 
+        current_carry, loss, metrics, preds, halted_all = train_state.model(
+            carry=current_carry,
+            batch=batch,
             return_keys=[]
         )
-
-        # Backpropagate every step (Deep Supervision) 
-        # but the carry is detached, so memory stays low
         ((1 / global_batch_size) * loss).backward()
-        
+
+        # 1. Local Exit: Logic OR Max Steps
+        stop_now = halted_all or (current_carry.steps.max() >= config.halt_max_steps)
+
+        # 2. Global Exit: Synchronize Rank 0 and Rank 1
+        if world_size > 1:
+            stop_t = torch.tensor(1.0 if stop_now else 0.0, device="cuda")
+            dist.all_reduce(stop_t, op=dist.ReduceOp.MIN) 
+            stop_now = stop_t.item() > 0.5
+
         total_loss += loss.detach()
         final_metrics = metrics # Keep the latest metrics (most accurate)
 
-        # Exit if each process is halted
-        if halted_all:
+        if stop_now:
             break
-
+        
     # Allreduce
     if world_size > 1:
         for param in train_state.model.parameters():
