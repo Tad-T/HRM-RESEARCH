@@ -16,13 +16,59 @@ from coolname.impl import generate_slug
 import hydra
 import pydantic
 from omegaconf import DictConfig
-from adam_atan2 import AdamATan2
 
 from models.layers import LoRALinear, CastedLinear
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
 from utils.functions import load_model_class, get_model_source_path
 from models.sparse_embedding import CastedSparseEmbeddingSignSGD_Distributed
 
+from torch.optim import Optimizer
+from typing import Optional, Callable
+
+class AdamATan2(Optimizer):
+    def __init__(self, params, lr=1e-4, betas=(0.9, 0.99), eps=1e-8, weight_decay=0.01):
+        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure: Optional[Callable[[], float]] = None) -> Any:
+        """Performs a single optimization step."""
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                # We cast to float to satisfy the IDE's return type requirement
+                loss = float(closure())
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                
+                grad = p.grad
+                state = self.state[p]
+
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p)
+                    state['exp_avg_sq'] = torch.zeros_like(p)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                beta1, beta2 = group['betas']
+                state['step'] += 1
+
+                if group['weight_decay'] != 0:
+                    p.mul_(1 - group['lr'] * group['weight_decay'])
+
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                # Use Atan2 for stable updates in reasoning loops
+                denom = exp_avg_sq.sqrt().add_(group['eps'])
+                update = torch.atan2(exp_avg, denom)
+
+                p.add_(update, alpha=-group['lr'])
+
+        return loss
 
 class LossConfig(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra='allow')
@@ -203,9 +249,9 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
             #model.parameters(),
             [p for p in model.parameters() if p.requires_grad],
 
-            lr=0,  # Needs to be set by scheduler
-            weight_decay=config.weight_decay,
-            betas=(config.beta1, config.beta2)
+            lr=config.lr,  # Needs to be set by scheduler
+            betas=(config.beta1, config.beta2),
+            weight_decay=config.weight_decay
         )
     ]
     optimizer_lrs = [
