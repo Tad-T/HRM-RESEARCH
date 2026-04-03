@@ -290,7 +290,9 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
     total_loss = 0
     final_metrics = {}
 
+    print("DEBUG: Entering Loop")
     while True:
+        print(f"DEBUG: Step {train_state.step}")
         current_carry, loss, metrics, preds, halted_all = train_state.model(
             carry=current_carry,
             batch=batch,
