@@ -324,14 +324,37 @@ def compute_lr(base_lr: float, config: PretrainConfig, train_state: TrainState):
 
 def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int):
     train_state.step += 1
-    if train_state.step > train_state.total_steps:  # At most train_total_steps
+    if train_state.step > train_state.total_steps:
         return
 
     # To device
     batch = {k: v.cuda() for k, v in batch.items()}
 
+    # --- LIVE REVEAL CURRICULUM ---
+    # Adjust TOTAL_CURRICULUM_STEPS to define how long the "help" lasts
+    TOTAL_CURRICULUM_STEPS = 300
+    START_REVEAL_PROB = 0.5
+    
+    # Calculate current reveal probability (Linearly decays to 0)
+    current_reveal_prob = max(0.0, START_REVEAL_PROB * (1.0 - (train_state.step / TOTAL_CURRICULUM_STEPS)))
+    
+    # We must not modify the original 'batch' dict directly if it's reused, 
+    # but since it's fresh from the loader here, we modify the tensor.
+    inputs = batch["inputs"]
+    labels = batch["labels"]
+    
+    # Identify which cells are blank (Value 1)
+    is_blank = (inputs == 1)
+    
+    # Randomly select which blanks to reveal
+    reveal_mask = (torch.rand_like(inputs.float()) < current_reveal_prob) & is_blank
+    
+    # Inject solution into the inputs
+    inputs[reveal_mask] = labels[reveal_mask]
+    # ------------------------------
+
     with torch.device("cuda"):
-            current_carry = train_state.model.initial_carry(batch)  # type: ignore
+        current_carry = train_state.model.initial_carry(batch)
 
     total_loss = 0
     final_metrics = {}
@@ -341,50 +364,40 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
         local_idx += 1
         current_carry, loss, metrics, preds, halted_all = train_state.model(
             carry=current_carry,
-            batch=batch,
+            batch=batch, # Now contains the 'revealed' inputs
             return_keys=[]
         )
         ((1 / global_batch_size) * loss).backward()
 
-        # 1. Local Exit: Logic OR Max Steps
         stop_now = halted_all or (current_carry.steps.max() >= config.halt_max_steps) or (local_idx >= config.halt_max_steps)
 
-        # 2. Global Exit: Synchronize Rank 0 and Rank 1
         if world_size > 1:
             stop_t = torch.tensor(1.0 if stop_now else 0.0, device="cuda")
             dist.all_reduce(stop_t, op=dist.ReduceOp.MIN) 
             stop_now = stop_t.item() > 0.5
 
         total_loss += loss.detach()
-        final_metrics = metrics # Keep the latest metrics (most accurate)
+        final_metrics = metrics 
 
         if stop_now:
             break
         
-    # Allreduce
     if world_size > 1:
         for param in train_state.model.parameters():
             if param.grad is not None:
                 dist.all_reduce(param.grad)
             
-    # Apply optimizer
     lr_this_step = None    
     for optim, base_lr in zip(train_state.optimizers, train_state.optimizer_lrs):
         lr_this_step = compute_lr(base_lr, config, train_state)
-
         for param_group in optim.param_groups:
             param_group['lr'] = lr_this_step
-            
         optim.step()
         optim.zero_grad()
 
-    # Reduce metrics
-    if len(metrics):
-        assert not any(v.requires_grad for v in metrics.values())
-
-        metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
-        # Reduce and reconstruct
-        metric_values = torch.stack([metrics[k] for k in metric_keys])
+    if len(final_metrics):
+        metric_keys = list(sorted(final_metrics.keys()))
+        metric_values = torch.stack([final_metrics[k] for k in metric_keys])
         if world_size > 1:
             dist.reduce(metric_values, dst=0)
 
@@ -392,14 +405,12 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             metric_values = metric_values.cpu().numpy()
             reduced_metrics = {k: metric_values[i] for i, k in enumerate(metric_keys)}
             
-            # Postprocess
-            count = max(reduced_metrics["count"], 1)  # Avoid NaNs
+            count = max(reduced_metrics["count"], 1)
             reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
 
             reduced_metrics["train/lr"] = lr_this_step
-            # Inside train_batch, after the forward pass:
-            # 'metrics' usually comes from your model's internal return
             reduced_metrics["train/avg_steps"] = current_carry.steps.float().mean()
+            reduced_metrics["train/curriculum_reveal_prob"] = current_reveal_prob # Track this in WandB
             return reduced_metrics
 
 
