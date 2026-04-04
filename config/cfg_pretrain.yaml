@@ -34,3 +34,6 @@ puzzle_emb_lr: 1e-2
 
 # Eval settings
 limit_eval_batches: -1
+
+# Curriculum learning settings
+start_reveal_prob: 0.5

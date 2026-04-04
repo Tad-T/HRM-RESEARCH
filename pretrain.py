@@ -119,6 +119,8 @@ class PretrainConfig(pydantic.BaseModel):
     eval_save_outputs: List[str] = []
     limit_eval_batches: int = -1  # For quick eval runs, set a positive number to limit eval batches
 
+    start_reveal_prob: float
+
 
 @dataclass
 class TrainState:
@@ -331,12 +333,16 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
     batch = {k: v.cuda() for k, v in batch.items()}
 
     # --- LIVE REVEAL CURRICULUM ---
-    # Adjust TOTAL_CURRICULUM_STEPS to define how long the "help" lasts
-    TOTAL_CURRICULUM_STEPS = 300
-    START_REVEAL_PROB = 0.5
-    
-    # Calculate current reveal probability (Linearly decays to 0)
-    current_reveal_prob = max(0.0, START_REVEAL_PROB * (1.0 - (train_state.step / TOTAL_CURRICULUM_STEPS)))
+    num_samples = 1000
+    steps_per_epoch = (num_samples + global_batch_size - 1) // global_batch_size
+    total_run_steps = steps_per_epoch * config.epochs
+
+    # 2. Define when the help should be completely gone (e.g., 80% of the way in)
+    curriculum_end_step = int(total_run_steps * 0.8)
+
+    # 3. Calculate current reveal probability
+    # It scales based on where you are in the ENTIRE run
+    current_reveal_prob = max(0.0, config.start_reveal_prob * (1.0 - (train_state.step / curriculum_end_step)))
     
     # We must not modify the original 'batch' dict directly if it's reused, 
     # but since it's fresh from the loader here, we modify the tensor.
