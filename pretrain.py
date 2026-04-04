@@ -154,20 +154,18 @@ def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size:
     return dataloader, dataset.metadata
 
 def apply_lora_to_reasoning(module: nn.Module, r: int = 32, alpha: int = 64):
-    """
-    Recursively finds all CastedLinear layers and wraps them in LoRA.
-    """
     for name, child in module.named_children():
         if isinstance(child, CastedLinear):
-            # 1. Create the LoRA wrapper around the existing CastedLinear
-            # We use alpha=r*2 as a common heuristic for stability
-            lora_layer = LoRALinear(child, r=r, alpha=alpha)
+            # ONLY apply to layers that handle internal reasoning
+            # We avoid the heads and embeddings to keep the 'steering' focused
+            targets = ["qkv_proj", "o_proj", "gate_up_proj", "down_proj"]
             
-            # 2. Replace the original attribute with the LoRA version
-            setattr(module, name, lora_layer)
-            
+            if any(t in name for t in targets):
+                lora_layer = LoRALinear(child, r=r, alpha=alpha)
+                setattr(module, name, lora_layer)
+                # Keep this print to verify it's actually hitting the blocks!
+                print(f"DEBUG: Applied LoRA to {name}") 
         else:
-            # 3. If it's not a linear layer, dive deeper (into Blocks, etc.)
             apply_lora_to_reasoning(child, r, alpha)
 
 def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, world_size: int):

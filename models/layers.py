@@ -65,23 +65,16 @@ class LoRALinear(nn.Module):
         # so that the initial impact of LoRA is 0
         in_features = base_layer.weight.shape[1]
         out_features = base_layer.weight.shape[0]
-        
-        self.lora_A = nn.Parameter(torch.empty((in_features, r)))
-        self.lora_B = nn.Parameter(torch.zeros((r, out_features)))
-        
+
+        # Inside LoRALinear.__init__
+        self.lora_A = nn.Parameter(torch.empty((in_features, r)).to(base_layer.weight.dtype))
+        self.lora_B = nn.Parameter(torch.zeros((r, out_features)).to(base_layer.weight.dtype))
+
         # Initialize A
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 1. Path of the frozen original weights
-        base_out = self.base(x)
-        
-        # 2. Path of the trainable adapters (A -> B)
-        # We ensure the dtype matches the input (usually bfloat16)
-        lora_out = (x.to(self.lora_A.dtype) @ self.lora_A) @ self.lora_B
-        
-        # 3. Combine
-        return base_out + (lora_out * self.scaling)
+        return self.base(x) + (x @ self.lora_A @ self.lora_B) * self.scaling
 
 class CastedLinear(nn.Module):
     def __init__(self,
