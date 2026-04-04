@@ -96,7 +96,6 @@ class PretrainConfig(pydantic.BaseModel):
     lr: float
     lr_min_ratio: float
     lr_warmup_steps: int
-    halt_max_steps: int
 
     weight_decay: float
     beta1: float
@@ -118,8 +117,6 @@ class PretrainConfig(pydantic.BaseModel):
     eval_interval: Optional[int] = None
     eval_save_outputs: List[str] = []
     limit_eval_batches: int = -1  # For quick eval runs, set a positive number to limit eval batches
-
-    start_reveal_prob: float
 
 
 @dataclass
