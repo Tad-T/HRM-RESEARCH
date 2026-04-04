@@ -323,87 +323,44 @@ def compute_lr(base_lr: float, config: PretrainConfig, train_state: TrainState):
         min_ratio=config.lr_min_ratio
     )
 
-
 def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, global_batch_size: int, rank: int, world_size: int):
     train_state.step += 1
-    if train_state.step > train_state.total_steps:
+    if train_state.step > train_state.total_steps:  # At most train_total_steps
         return
 
     # To device
     batch = {k: v.cuda() for k, v in batch.items()}
 
-    # --- LIVE REVEAL CURRICULUM ---
-    num_samples = 1000
-    steps_per_epoch = (num_samples + global_batch_size - 1) // global_batch_size
-    total_run_steps = steps_per_epoch * config.epochs
+    # Init carry if it is None
+    if train_state.carry is None:
+        with torch.device("cuda"):
+            train_state.carry = train_state.model.initial_carry(batch)  # type: ignore
 
-    # 2. Define when the help should be completely gone (e.g., 80% of the way in)
-    curriculum_end_step = int(total_run_steps * 0.8)
+    # Forward
+    train_state.carry, loss, metrics, _, _ = train_state.model(carry=train_state.carry, batch=batch, return_keys=[])
 
-    # 3. Calculate current reveal probability
-    # It scales based on where you are in the ENTIRE run
-    current_reveal_prob = max(0.0, config.start_reveal_prob * (1.0 - (train_state.step / curriculum_end_step)))
-    
-    # We must not modify the original 'batch' dict directly if it's reused, 
-    # but since it's fresh from the loader here, we modify the tensor.
-    inputs = batch["inputs"]
-    labels = batch["labels"]
-    
-    # Identify which cells are blank (Value 1)
-    is_blank = (inputs == 1)
-    
-    # Randomly select which blanks to reveal
-    reveal_mask = (torch.rand_like(inputs.float()) < current_reveal_prob) & is_blank
-    
-    # Inject solution into the inputs
-    inputs[reveal_mask] = labels[reveal_mask]
-    # ------------------------------
+    ((1 / global_batch_size) * loss).backward()
 
-    with torch.device("cuda"):
-        current_carry = train_state.model.initial_carry(batch)
-
-    total_loss = 0
-    final_metrics = {}
-
-    local_idx = 0
-    while True:
-        local_idx += 1
-        current_carry, loss, metrics, preds, halted_all = train_state.model(
-            carry=current_carry,
-            batch=batch, # Now contains the 'revealed' inputs
-            return_keys=[]
-        )
-        ((1 / global_batch_size) * loss).backward()
-
-        stop_now = halted_all or (current_carry.steps.max() >= config.halt_max_steps) or (local_idx >= config.halt_max_steps)
-
-        if world_size > 1:
-            stop_t = torch.tensor(1.0 if stop_now else 0.0, device="cuda")
-            dist.all_reduce(stop_t, op=dist.ReduceOp.MIN) 
-            stop_now = stop_t.item() > 0.5
-
-        total_loss += loss.detach()
-        final_metrics = metrics 
-
-        if stop_now:
-            break
-        
+    # Allreduce
     if world_size > 1:
         for param in train_state.model.parameters():
             if param.grad is not None:
                 dist.all_reduce(param.grad)
             
+    # Apply optimizer
     lr_this_step = None    
     for optim, base_lr in zip(train_state.optimizers, train_state.optimizer_lrs):
         lr_this_step = compute_lr(base_lr, config, train_state)
+
         for param_group in optim.param_groups:
             param_group['lr'] = lr_this_step
+            
         optim.step()
         optim.zero_grad()
 
-    if len(final_metrics):
-        metric_keys = list(sorted(final_metrics.keys()))
-        metric_values = torch.stack([final_metrics[k] for k in metric_keys])
+    if len(metrics):
+        metric_keys = list(sorted(train_state.carry.keys()))
+        metric_values = torch.stack([metrics[k] for k in metric_keys])
         if world_size > 1:
             dist.reduce(metric_values, dst=0)
 
@@ -415,8 +372,6 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
 
             reduced_metrics["train/lr"] = lr_this_step
-            reduced_metrics["train/avg_steps"] = current_carry.steps.float().mean()
-            reduced_metrics["train/curriculum_reveal_prob"] = current_reveal_prob # Track this in WandB
             return reduced_metrics
 
 
