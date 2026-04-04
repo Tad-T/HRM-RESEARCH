@@ -32,5 +32,5 @@ puzzle_emb_weight_decay: 0.1
 # Hyperparams - Puzzle embeddings training
 puzzle_emb_lr: 1e-2
 
-#eval settings
+# Eval settings
 limit_eval_batches: -1
