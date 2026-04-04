@@ -196,7 +196,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
             
             # 1. Load the frozen knowledge
             sd = torch.load(config.pretrained_weight_path, map_location="cuda")
-            base_model.load_state_dict(sd, strict=False)
+            base_model.load_state_dict(sd, strict=True)
             
             # 2. Add the trainable "side-cars"
             apply_lora_to_reasoning(base_model.inner, r=8)
