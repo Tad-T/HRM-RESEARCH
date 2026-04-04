@@ -196,7 +196,18 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
             
             # 1. Load the frozen knowledge
             sd = torch.load(config.pretrained_weight_path, map_location="cuda")
-            base_model.load_state_dict(sd, strict=True)
+
+            # 2. Strip the 'model.' prefix from every key
+            new_sd = {}
+            for k, v in sd.items():
+                if k.startswith("model."):
+                    new_sd[k[6:]] = v  # [6:] removes 'model.'
+                else:
+                    new_sd[k] = v
+
+            # 3. Load into the base model BEFORE applying LoRA
+            print(f">>> Loading {len(new_sd)} cleaned keys into base_model...")
+            base_model.load_state_dict(new_sd, strict=True)
             
             # 2. Add the trainable "side-cars"
             apply_lora_to_reasoning(base_model.inner, r=8)
