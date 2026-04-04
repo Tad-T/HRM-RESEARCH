@@ -75,7 +75,19 @@ class LoRALinear(nn.Module):
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.base(x) + (x @ self.lora_A @ self.lora_B) * self.scaling
+        # Run the frozen base pass
+        base_out = self.base(x)
+        
+        # Ensure adapters match the input 'x' dtype at runtime
+        # This handles cases where the model is cast to bf16 AFTER __init__
+        if x.dtype != self.lora_A.dtype:
+            self.lora_A.data = self.lora_A.data.to(x.dtype)
+            self.lora_B.data = self.lora_B.data.to(x.dtype)
+            
+        # The actual LoRA math
+        lora_out = (x @ self.lora_A @ self.lora_B) * self.scaling
+        
+        return base_out + lora_out
 
 class CastedLinear(nn.Module):
     def __init__(self,
