@@ -10,9 +10,6 @@ hydra:
 # Data path
 data_path: data/arc-aug-1000
 
-# Dataset settings
-reveal_prob: 0.5
-
 # Hyperparams - Training
 global_batch_size: 768
 

@@ -22,7 +22,7 @@ class DataProcessConfig(BaseModel):
     subsample_size: Optional[int] = None
     min_difficulty: Optional[int] = None
     num_aug: int = 0
-    reveal_prob: float
+    reveal_prob: float = 0.5
 
 
 def shuffle_sudoku(board: np.ndarray, solution: np.ndarray):
