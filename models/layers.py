@@ -56,21 +56,22 @@ class LoRALinear(nn.Module):
     def __init__(self, base_layer: nn.Module, r: int = 32, alpha: int = 16):
         super().__init__()
         self.base = base_layer  # This is your frozen CastedLinear
+        self.base.weight.requires_grad_(False)
         self.r = r
         self.alpha = alpha
         self.scaling = alpha / r
 
-        # Define A and B parameters
-        # A is initialized with noise, B is initialized with zeros
-        # so that the initial impact of LoRA is 0
         in_features = base_layer.weight.shape[1]
         out_features = base_layer.weight.shape[0]
 
-        # Inside LoRALinear.__init__
-        self.lora_A = nn.Parameter(torch.empty((in_features, r)).to(base_layer.weight.dtype))
-        self.lora_B = nn.Parameter(torch.zeros((r, out_features)).to(base_layer.weight.dtype))
-
-        # Initialize A
+        # Determine the dtype of the base layer (likely bfloat16)
+        target_dtype = base_layer.weight.dtype
+        
+        # Initialize and cast immediately
+        self.lora_A = nn.Parameter(torch.empty((in_features, r), dtype=target_dtype))
+        self.lora_B = nn.Parameter(torch.zeros((r, out_features), dtype=target_dtype))
+        
+        # Initialize A with Kaiming
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
