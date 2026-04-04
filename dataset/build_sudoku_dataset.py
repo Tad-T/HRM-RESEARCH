@@ -22,6 +22,7 @@ class DataProcessConfig(BaseModel):
     subsample_size: Optional[int] = None
     min_difficulty: Optional[int] = None
     num_aug: int = 0
+    reveal_prob: float = 0.5
 
 
 def shuffle_sudoku(board: np.ndarray, solution: np.ndarray):
@@ -98,6 +99,22 @@ def convert_subset(set_name: str, config: DataProcessConfig):
                 inp, out = orig_inp, orig_out
             else:
                 inp, out = shuffle_sudoku(orig_inp, orig_out)
+
+            # --- THE REVEAL TRICK ---
+            if config.reveal_prob > 0:
+                missing_mask = (inp == 0)
+                zeros_idx = np.where(missing_mask.flatten())[0]
+                
+                # Randomly pick which 'blanks' to reveal from the solution
+                num_to_reveal = int(len(zeros_idx) * config.reveal_prob)
+                if num_to_reveal > 0:
+                    reveal_idx = np.random.choice(zeros_idx, size=num_to_reveal, replace=False)
+                    
+                    flat_inp = inp.flatten()
+                    flat_out = out.flatten()
+                    flat_inp[reveal_idx] = flat_out[reveal_idx]
+                    inp = flat_inp.reshape(9, 9)
+            # ------------------------
 
             # Push puzzle (only single example)
             results["inputs"].append(inp)
