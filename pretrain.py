@@ -356,7 +356,10 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
         optim.zero_grad()
 
     if len(metrics):
-        metric_keys = list(sorted(train_state.carry.keys()))
+        assert not any(v.requires_grad for v in metrics.values())
+
+        metric_keys = list(sorted(metrics.keys()))  # Sort keys to guarantee all processes use the same order.
+        # Reduce and reconstruct
         metric_values = torch.stack([metrics[k] for k in metric_keys])
         if world_size > 1:
             dist.reduce(metric_values, dst=0)
@@ -365,7 +368,8 @@ def train_batch(config: PretrainConfig, train_state: TrainState, batch: Any, glo
             metric_values = metric_values.cpu().numpy()
             reduced_metrics = {k: metric_values[i] for i, k in enumerate(metric_keys)}
             
-            count = max(reduced_metrics["count"], 1)
+            # Postprocess
+            count = max(reduced_metrics["count"], 1)  # Avoid NaNs
             reduced_metrics = {f"train/{k}": v / (global_batch_size if k.endswith("loss") else count) for k, v in reduced_metrics.items()}
 
             reduced_metrics["train/lr"] = lr_this_step
