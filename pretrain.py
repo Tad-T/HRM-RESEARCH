@@ -153,7 +153,7 @@ def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size:
     )
     return dataloader, dataset.metadata
 
-def apply_lora_to_reasoning(module: nn.Module, r: int = 8, alpha: int = 16):
+def apply_lora_to_reasoning(module: nn.Module, r: int = 32, alpha: int = 16):
     """
     Recursively finds all CastedLinear layers and wraps them in LoRA.
     """
