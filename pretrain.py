@@ -153,7 +153,7 @@ def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size:
     )
     return dataloader, dataset.metadata
 
-def apply_lora_to_reasoning(module: nn.Module, r: int = 32, alpha: int = 64):
+def apply_lora_to_reasoning(module: nn.Module, r: int = 64, alpha: int = 128):
     for name, child in module.named_children():
         if isinstance(child, CastedLinear):
             # ONLY apply to layers that handle internal reasoning
@@ -208,7 +208,7 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
             base_model.load_state_dict(new_sd, strict=True)
             
             # 2. Add the trainable "side-cars"
-            apply_lora_to_reasoning(base_model.inner, r=32, alpha=64)
+            apply_lora_to_reasoning(base_model.inner, r=64, alpha=128)
             loss_extra = config.arch.loss.model_dump(exclude={'name'})
             model: nn.Module = loss_head_cls(base_model, **loss_extra)
 
