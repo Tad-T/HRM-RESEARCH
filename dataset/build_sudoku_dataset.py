@@ -14,14 +14,15 @@ from common import PuzzleDatasetMetadata
 
 cli = ArgParser()
 
-
 class DataProcessConfig(BaseModel):
     source_repo: str = "sapientinc/sudoku-extreme"
-    output_dir: str = "data/sudoku-extreme-full"
+    # New: Path to a simpler dataset or a flag to generate easy ones
+    easy_repo: str = "steven-terner/sudoku" 
+    output_dir: str = "data/sudoku-curriculum"
 
-    subsample_size: Optional[int] = None
-    min_difficulty: Optional[int] = None
-    num_aug: int = 0
+    easy_ratio: float = 0.5  # 50% easy puzzles, 50% extreme
+    subsample_size: Optional[int] = 2000 # Smaller, high-quality set
+    num_aug: int = 2 # Increase augmentation to help logic generalization
 
 
 def shuffle_sudoku(board: np.ndarray, solution: np.ndarray):
@@ -57,106 +58,111 @@ def shuffle_sudoku(board: np.ndarray, solution: np.ndarray):
     return apply_transformation(board), apply_transformation(solution)
 
 
+import random
 def convert_subset(set_name: str, config: DataProcessConfig):
-    # Read CSV
-    inputs = []
-    labels = []
+    # 1. Initialize storage for both types
+    extreme_inputs, extreme_labels = [], []
+    easy_inputs, easy_labels = [], []
     
-    with open(hf_hub_download(config.source_repo, f"{set_name}.csv", repo_type="dataset"), newline="") as csvfile:
+    # --- PART A: LOAD EXTREME DATA (Goal) ---
+    print(f">>> Fetching Extreme samples for {set_name}...")
+    extreme_path = hf_hub_download(config.source_repo, f"{set_name}.csv", repo_type="dataset")
+    with open(extreme_path, newline="") as csvfile:
         reader = csv.reader(csvfile)
         next(reader)  # Skip header
-        for source, q, a, rating in reader:
-            if (config.min_difficulty is None) or (int(rating) >= config.min_difficulty):
-                assert len(q) == 81 and len(a) == 81
-                
-                inputs.append(np.frombuffer(q.replace('.', '0').encode(), dtype=np.uint8).reshape(9, 9) - ord('0'))
-                labels.append(np.frombuffer(a.encode(), dtype=np.uint8).reshape(9, 9) - ord('0'))
+        for row in reader:
+            # sapientinc/sudoku-extreme format: source, puzzle, solution, rating
+            q, a = row[1], row[2]
+            extreme_inputs.append(np.frombuffer(q.replace('.', '0').encode(), dtype=np.uint8).reshape(9, 9) - ord('0'))
+            extreme_labels.append(np.frombuffer(a.encode(), dtype=np.uint8).reshape(9, 9) - ord('0'))
 
-    # If subsample_size is specified for the training set,
-    # randomly sample the desired number of examples.
-    if set_name == "train" and config.subsample_size is not None:
-        total_samples = len(inputs)
-        if config.subsample_size < total_samples:
-            indices = np.random.choice(total_samples, size=config.subsample_size, replace=False)
-            inputs = [inputs[i] for i in indices]
-            labels = [labels[i] for i in indices]
+    # --- PART B: LOAD EASY DATA (Anchor) ---
+    # We use a standard dataset like 'steven-terner/sudoku' or similar for 35+ clue puzzles
+    print(f">>> Fetching Easy/Medium anchors for {set_name}...")
+    try:
+        # Note: Adjust filename if the easy repo uses different naming (e.g., 'sudoku.csv')
+        easy_path = hf_hub_download("steven-terner/sudoku", "sudoku.csv", repo_type="dataset")
+        with open(easy_path, newline="") as csvfile:
+            reader = csv.reader(csvfile)
+            next(reader)
+            count = 0
+            for row in reader:
+                q, a = row[0], row[1] # standard format is usually q, a
+                easy_inputs.append(np.frombuffer(q.encode(), dtype=np.uint8).reshape(9, 9) - ord('0'))
+                easy_labels.append(np.frombuffer(a.encode(), dtype=np.uint8).reshape(9, 9) - ord('0'))
+                count += 1
+                if count > len(extreme_inputs): break # Keep pools somewhat balanced
+    except Exception as e:
+        print(f"⚠️ Could not load easy repo, falling back to extreme only: {e}")
+        easy_inputs, easy_labels = extreme_inputs, extreme_labels
 
-    # Generate dataset
-    num_augments = config.num_aug if set_name == "train" else 0
-
+    # --- PART C: CURRICULUM MIXING ---
     results = {k: [] for k in ["inputs", "labels", "puzzle_identifiers", "puzzle_indices", "group_indices"]}
     puzzle_id = 0
     example_id = 0
-    
     results["puzzle_indices"].append(0)
     results["group_indices"].append(0)
+
+    # Determine total iterations
+    total_to_process = config.subsample_size if (set_name == "train" and config.subsample_size) else len(extreme_inputs)
     
-    for orig_inp, orig_out in zip(tqdm(inputs), labels):
+    print(f">>> Mixing {total_to_process} samples with {config.easy_ratio*100}% Easy/Extreme ratio...")
+
+    for i in tqdm(range(total_to_process)):
+        # Determine if this slot gets an Easy or Extreme puzzle
+        if random.random() < config.easy_ratio and len(easy_inputs) > 0:
+            idx = random.randrange(len(easy_inputs))
+            orig_inp, orig_out = easy_inputs[idx], easy_labels[idx]
+        else:
+            idx = random.randrange(len(extreme_inputs))
+            orig_inp, orig_out = extreme_inputs[idx], extreme_labels[idx]
+
+        # Apply Augmentations (Rotation/Permutation)
+        num_augments = config.num_aug if set_name == "train" else 0
         for aug_idx in range(1 + num_augments):
-            # First index is not augmented
             if aug_idx == 0:
                 inp, out = orig_inp, orig_out
             else:
                 inp, out = shuffle_sudoku(orig_inp, orig_out)
 
-            # Push puzzle (only single example)
             results["inputs"].append(inp)
             results["labels"].append(out)
             example_id += 1
             puzzle_id += 1
-            
             results["puzzle_indices"].append(example_id)
             results["puzzle_identifiers"].append(0)
             
-        # Push group
         results["group_indices"].append(puzzle_id)
-        
-    # To Numpy
+
+    # --- PART D: SAVE AS NUMPY (Same as original) ---
     def _seq_to_numpy(seq):
         arr = np.concatenate(seq).reshape(len(seq), -1)
-        
         assert np.all((arr >= 0) & (arr <= 9))
         return arr + 1
     
-    results = {
+    results_final = {
         "inputs": _seq_to_numpy(results["inputs"]),
         "labels": _seq_to_numpy(results["labels"]),
-        
         "group_indices": np.array(results["group_indices"], dtype=np.int32),
         "puzzle_indices": np.array(results["puzzle_indices"], dtype=np.int32),
         "puzzle_identifiers": np.array(results["puzzle_identifiers"], dtype=np.int32),
     }
 
-    # Metadata
-    metadata = PuzzleDatasetMetadata(
-        seq_len=81,
-        vocab_size=10 + 1,  # PAD + "0" ... "9"
-        
-        pad_id=0,
-        ignore_label_id=0,
-        
-        blank_identifier_id=0,
-        num_puzzle_identifiers=1,
-        
-        total_groups=len(results["group_indices"]) - 1,
-        mean_puzzle_examples=1,
-        sets=["all"]
-    )
-
-    # Save metadata as JSON.
     save_dir = os.path.join(config.output_dir, set_name)
     os.makedirs(save_dir, exist_ok=True)
     
+    # Save Metadata
+    metadata = PuzzleDatasetMetadata(
+        seq_len=81, vocab_size=11, pad_id=0, ignore_label_id=0,
+        blank_identifier_id=0, num_puzzle_identifiers=1,
+        total_groups=len(results_final["group_indices"]) - 1,
+        mean_puzzle_examples=1, sets=["all"]
+    )
+    
     with open(os.path.join(save_dir, "dataset.json"), "w") as f:
         json.dump(metadata.model_dump(), f)
-        
-    # Save data
-    for k, v in results.items():
+    for k, v in results_final.items():
         np.save(os.path.join(save_dir, f"all__{k}.npy"), v)
-        
-    # Save IDs mapping (for visualization only)
-    with open(os.path.join(config.output_dir, "identifiers.json"), "w") as f:
-        json.dump(["<blank>"], f)
 
 
 @cli.command(singleton=True)
