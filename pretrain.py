@@ -239,26 +239,43 @@ def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, 
 
     # 2. Build Optimizers targeting only requires_grad=True
     # We filter the parameters so the optimizer doesn't track frozen weights
-    trainable_list = [p for p in model.parameters() if p.requires_grad]
-
-    optimizers = [
-        CastedSparseEmbeddingSignSGD_Distributed(
-            model.model.puzzle_emb.parameters(), # Targeted for embeddings
-            lr=0, 
-            weight_decay=config.puzzle_emb_weight_decay,
-            world_size=world_size
-        ),
+    emb_params = [p for p in model.model.puzzle_emb.parameters() if p.requires_grad]
+    
+    # 2. For the main AdamATan2 Optimizer (Everything else that is trainable)
+    # We exclude the embedding params so they aren't optimized twice
+    main_params = [
+        p for name, p in model.named_parameters() 
+        if p.requires_grad and "puzzle_emb" not in name
+    ]
+    
+    optimizers = []
+    
+    # Only add the Sparse Optimizer if there are actually parameters to optimize
+    if emb_params:
+        optimizers.append(
+            CastedSparseEmbeddingSignSGD_Distributed(
+                emb_params,
+                lr=0,
+                weight_decay=config.puzzle_emb_weight_decay,
+                world_size=world_size
+            )
+        )
+    
+    # Add the main Adam optimizer
+    optimizers.append(
         AdamATan2(
-            trainable_list, # Only the unlocked core
+            main_params,
             lr=config.lr,
             betas=(config.beta1, config.beta2),
             weight_decay=config.weight_decay
         )
-    ]
+    )
     
-    optimizer_lrs = [config.puzzle_emb_lr, config.lr]
-
-    return model, optimizers, optimizer_lrs
+    # Match the LR list to the number of optimizers we actually created
+    active_lrs = [config.puzzle_emb_lr] if emb_params else []
+    active_lrs.append(config.lr)
+    
+    return model, optimizers, active_lrs
 
 
 def cosine_schedule_with_warmup_lr_lambda(
