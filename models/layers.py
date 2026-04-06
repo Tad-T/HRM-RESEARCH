@@ -52,6 +52,7 @@ def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, si
 
     return q_embed.to(orig_dtype), k_embed.to(orig_dtype)
 
+# NO LONGER USED
 class LoRALinear(nn.Module):
     def __init__(self, base_layer: nn.Module, r: int = 64, alpha: int = 128):
         super().__init__()

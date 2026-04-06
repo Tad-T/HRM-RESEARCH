@@ -153,6 +153,7 @@ def create_dataloader(config: PretrainConfig, split: str, rank: int, world_size:
     )
     return dataloader, dataset.metadata
 
+# NO LONGER USED
 def apply_lora_to_reasoning(module: nn.Module, r: int = 64, alpha: int = 128):
     for name, child in module.named_children():
         if isinstance(child, CastedLinear):
@@ -171,101 +172,91 @@ def apply_lora_to_reasoning(module: nn.Module, r: int = 64, alpha: int = 128):
 def create_model(config: PretrainConfig, train_metadata: PuzzleDatasetMetadata, world_size: int):
     model_cfg = dict(
         **config.arch.__pydantic_extra__,  # type: ignore
-
         batch_size=config.global_batch_size // world_size,
-
         vocab_size=train_metadata.vocab_size,
         seq_len=train_metadata.seq_len,
         num_puzzle_identifiers=train_metadata.num_puzzle_identifiers,
-        causal=False  # Non-autoregressive
+        causal=False 
     )
 
-    # Instantiate model with loss head
     model_cls = load_model_class(config.arch.name)
     loss_head_cls = load_model_class(config.arch.loss.name)
 
     with torch.device("cuda"):
-        # Always start with the raw architecture
+        # 1. Always start with the base architecture
         base_model: nn.Module = model_cls(model_cfg)
 
-        # CASE A: FINETUNING (Load weights + Inject LoRA)
+        # CASE: LOADING PRETRAINED CHECKPOINT (Partial Fine-tuning)
         if config.pretrained_weight_path and os.path.exists(config.pretrained_weight_path):
-            print(f">>> LORA MODE: Loading weights from {config.pretrained_weight_path}")
+            print(f">>> FINETUNE MODE: Loading weights from {config.pretrained_weight_path}")
             
-            # 1. Load the frozen knowledge
             sd = torch.load(config.pretrained_weight_path, map_location="cuda")
 
-            # 2. Strip the 'model.' prefix from every key
-            new_sd = {}
-            for k, v in sd.items():
-                if k.startswith("model."):
-                    new_sd[k[6:]] = v  # [6:] removes 'model.'
-                else:
-                    new_sd[k] = v
-
-            # 3. Load into the base model BEFORE applying LoRA
-            print(f">>> Loading {len(new_sd)} cleaned keys into base_model...")
+            # Clean prefixes (model.inner -> inner)
+            new_sd = {k[6:] if k.startswith("model.") else k: v for k, v in sd.items()}
+            
+            # Load weights into base
             base_model.load_state_dict(new_sd, strict=True)
             
-            # 2. Add the trainable "side-cars"
-            apply_lora_to_reasoning(base_model.inner, r=64, alpha=128)
+            # Initialize the Loss Head wrapper
             loss_extra = config.arch.loss.model_dump(exclude={'name'})
             model: nn.Module = loss_head_cls(base_model, **loss_extra)
 
-            # 3. Lock the base, unlock the adapters
+            # --- THE UNFREEZE STRATEGY ---
+            # First, freeze everything
             for param in model.parameters():
                 param.requires_grad = False
-            for name, param in model.named_parameters():
-                if "lora_" in name or "q_head" in name:
-                    param.requires_grad = True
 
-        # CASE B: PRETRAINING (From Scratch)
+            # Now unlock the "Reasoning Core"
+            # We unlock H/L levels (logic) and puzzle_emb (input context)
+            # We leave q_head FROZEN so it doesn't change the halting behavior
+            unfreeze_targets = ["H_level", "L_level", "puzzle_emb"]
+            for name, param in model.named_parameters():
+                if any(target in name for target in unfreeze_targets):
+                    param.requires_grad = True
+                    # Optional: print(f"🔓 Unlocked: {name}")
+
+        # CASE: PRETRAINING (From Scratch)
         else:
             print(">>> PRETRAIN MODE: Fresh weights, full gradients.")
             loss_extra = config.arch.loss.model_dump(exclude={'name'})
             model = loss_head_cls(base_model, **loss_extra)
-            # All params stay requires_grad = True (default)
-            
-            # Ensure everything is trainable
             for param in model.parameters():
                 param.requires_grad = True
 
+        # Statistics
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total_params = sum(p.numel() for p in model.parameters())
         print(f">>> [Model Setup] Trainable: {trainable_params:,} | Total: {total_params:,} ({100 * trainable_params/total_params:.2f}%)")
 
         if "DISABLE_COMPILE" not in os.environ:
-            model = torch.compile(model, dynamic=False)  # type: ignore
+            model = torch.compile(model, dynamic=False) # type: ignore
 
-        # Broadcast parameters from rank 0
         if world_size > 1:
             with torch.no_grad():
                 for param in list(model.parameters()) + list(model.buffers()):
                     dist.broadcast(param, src=0)
 
-    # Optimizers and lr
+    # 2. Build Optimizers targeting only requires_grad=True
+    # We filter the parameters so the optimizer doesn't track frozen weights
+    trainable_list = [p for p in model.parameters() if p.requires_grad]
+
     optimizers = [
         CastedSparseEmbeddingSignSGD_Distributed(
-            model.model.puzzle_emb.buffers(),  # type: ignore
-            
-            lr=0,  # Needs to be set by scheduler
+            model.model.puzzle_emb.parameters(), # Targeted for embeddings
+            lr=0, 
             weight_decay=config.puzzle_emb_weight_decay,
-
             world_size=world_size
         ),
         AdamATan2(
-            #model.parameters(),
-            [p for p in model.parameters() if p.requires_grad],
-
-            lr=config.lr,  # Needs to be set by scheduler
+            trainable_list, # Only the unlocked core
+            lr=config.lr,
             betas=(config.beta1, config.beta2),
             weight_decay=config.weight_decay
         )
     ]
-    optimizer_lrs = [
-        config.puzzle_emb_lr,
-        config.lr
-    ]
+    
+    optimizer_lrs = [config.puzzle_emb_lr, config.lr]
 
     return model, optimizers, optimizer_lrs
 
