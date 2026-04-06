@@ -76,25 +76,34 @@ def convert_subset(set_name: str, config: DataProcessConfig):
             extreme_inputs.append(np.frombuffer(q.replace('.', '0').encode(), dtype=np.uint8).reshape(9, 9) - ord('0'))
             extreme_labels.append(np.frombuffer(a.encode(), dtype=np.uint8).reshape(9, 9) - ord('0'))
 
-    # --- PART B: LOAD EASY DATA (Anchor) ---
-    # We use a standard dataset like 'steven-terner/sudoku' or similar for 35+ clue puzzles
-    print(f">>> Fetching Easy/Medium anchors for {set_name}...")
-    try:
-        # Note: Adjust filename if the easy repo uses different naming (e.g., 'sudoku.csv')
-        easy_path = hf_hub_download("steven-terner/sudoku", "sudoku.csv", repo_type="dataset")
-        with open(easy_path, newline="") as csvfile:
-            reader = csv.reader(csvfile)
-            next(reader)
-            count = 0
-            for row in reader:
-                q, a = row[0], row[1] # standard format is usually q, a
-                easy_inputs.append(np.frombuffer(q.encode(), dtype=np.uint8).reshape(9, 9) - ord('0'))
-                easy_labels.append(np.frombuffer(a.encode(), dtype=np.uint8).reshape(9, 9) - ord('0'))
-                count += 1
-                if count > len(extreme_inputs): break # Keep pools somewhat balanced
-    except Exception as e:
-        print(f"⚠️ Could not load easy repo, falling back to extreme only: {e}")
-        easy_inputs, easy_labels = extreme_inputs, extreme_labels
+    # --- PART B: LOCAL EASY GENERATOR (No Download Needed) ---
+    print(f">>> Generating Local Easy/Medium anchors for {set_name}...")
+    
+    def generate_local_easy(n=5000):
+        # A perfectly solved base grid
+        base_sol = np.array([
+            [1,2,3,4,5,6,7,8,9], [4,5,6,7,8,9,1,2,3], [7,8,9,1,2,3,4,5,6],
+            [2,3,1,5,6,4,8,9,7], [5,6,4,8,9,7,2,3,1], [8,9,7,2,3,1,5,6,4],
+            [3,1,2,6,4,5,9,7,8], [6,4,5,9,7,8,3,1,2], [9,7,8,3,1,2,6,4,5]
+        ], dtype=np.uint8)
+        
+        local_in, local_out = [], []
+        for _ in range(n):
+            # 1. Shuffle digits and positions to get a new unique solution
+            s_inp, s_out = shuffle_sudoku(base_sol, base_sol)
+            
+            # 2. Poke holes to make it "Easy" (35-45 clues remaining)
+            # Easy puzzles have roughly 40 empty cells
+            easy_inp = s_out.copy()
+            flat = easy_inp.flatten()
+            indices = np.random.choice(81, size=random.randint(35, 45), replace=False)
+            flat[indices] = 0
+            
+            local_in.append(easy_inp)
+            local_out.append(s_out)
+        return local_in, local_out
+
+    easy_inputs, easy_labels = generate_local_easy(n=10000 if set_name == "train" else 1000)
 
     # --- PART C: CURRICULUM MIXING ---
     results = {k: [] for k in ["inputs", "labels", "puzzle_identifiers", "puzzle_indices", "group_indices"]}
